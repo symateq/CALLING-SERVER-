@@ -120,10 +120,18 @@ Two practical consequences:
 
 ## Findings from check 8 — require action before Phase 2
 
-None of these are exposed to the internet right now (NSG has zero rules
-and the shared Security List permits none of these ports), so there is
-no live risk at this moment. All three must be resolved before any
-firewall rule opens anything.
+**All three were resolved in the hardening pass below (2026-09-29).**
+
+Wording correction: an earlier draft of this report said "nothing is
+exposed because the NSG has zero rules." That is not accurate, and the
+distinction matters. An empty NSG grants nothing but also **blocks**
+nothing — actual exposure is the *union* of the shared Security List and
+any NSG rules. Ports 80/443/8080 were therefore reachable at the cloud
+network layer via the shared list (they simply had nothing listening
+behind them once nginx was purged). SIP 5060 and IAX2 4569 were never
+externally reachable, because neither the shared list nor any NSG
+permitted those ports — which is why these findings carried no live risk
+at the time, not the empty NSG by itself.
 
 **Finding 1 — `chan_sip` is loaded and bound to `0.0.0.0:5060`.**
 The deprecated SIP stack is Running alongside PJSIP, both claiming 5060.
@@ -159,3 +167,164 @@ Memory after reboot: 498 MB available of 954 MB.
 **Stopped here as instructed.** Phase 2 not started — no external
 firewall rules added, no WireGuard peers created, no Telnyx
 configuration touched.
+
+---
+
+# Phase 1 hardening pass
+
+Performed: 2026-09-29, after reboot verification. Phase 2 **not** started.
+
+## 1. Legacy `chan_sip` removed
+
+- `modules.conf` backed up to `/root/config-backups/<ts>-hardening/`.
+- Dependency check before disabling: `sip show peers` gave 0 peers;
+  `sip show channels` gave 0 active dialogs; every `Dial()` in the
+  dialplan is `PJSIP/...` with no bare `SIP/` channel anywhere; and
+  `sip.conf` held only the stock Ubuntu template, no configured peers.
+- `noload => chan_sip.so` added to `modules.conf`; Asterisk restarted (a
+  `noload` directive needs a restart, not a reload).
+- Verified: `chan_sip` reports **0 modules loaded**. `res_pjsip.so` is
+  still Running (use count 51) — not removed, as required. UDP 5060 is
+  now owned solely by the PJSIP transport, and endpoints 101/102/telnyx
+  are intact.
+
+## 2. IAX2 removed
+
+- Dependency check: `iax2 show peers` 0, `iax2 show channels` 0, no
+  `IAX2/` references in the dialplan, `iax.conf` stock only.
+- `noload => chan_iax2.so` added.
+- Verified: `chan_iax2` reports **0 modules loaded**, and **UDP 4569 is
+  no longer listening**.
+
+## 3. containerd removed, after dependency checks
+
+Checks run before touching it:
+
+- `apt-cache rdepends --installed containerd` returned **no reverse
+  dependencies**.
+- `dpkg --purge --dry-run` confirmed it would remove containerd and
+  nothing else.
+- Docker / dockerd absent. Kubernetes tooling (kubelet, kubeadm, crictl,
+  k3s) absent.
+- Snaps present are core18, oracle-cloud-agent and snapd — none use
+  containerd.
+- `ctr containers list` empty; `ctr namespaces list` empty.
+- `systemctl list-dependencies --reverse containerd.service` showed only
+  `multi-user.target`, i.e. nothing requires it.
+
+Stopped, disabled, purged. Orphan cleanup was **dry-run first**, and each
+candidate was individually verified as unused before removal.
+
+**Exactly 6 packages were removed by `apt-get autoremove`:**
+`ubuntu-fan`, `bridge-utils`, `dns-root-data`, `dnsmasq-base`, `pigz`,
+`runc`.
+
+Why each was safe: the set is a closed Docker/FAN leftover cluster —
+`bridge-utils` was needed only by `ubuntu-fan`, `dns-root-data` only by
+`dnsmasq-base`, and `dnsmasq-base` only by `ubuntu-fan`; `pigz` and
+`runc` had no dependents at all. Separately confirmed that the `dnsmasq`
+service was **inactive** (DNS here is served by `systemd-resolved` on
+127.0.0.53/54, unaffected) and that **no bridge interfaces existed**.
+After removal: DNS still resolves, all calling services still active.
+
+## 4. Host-level default-deny firewall
+
+**Existing configuration was inspected first.** The backend is iptables
+(nf_tables) with `iptables-persistent` already installed; `ufw` is
+absent. The pre-existing IPv4 INPUT chain was Oracle's default plus two
+stale rules left over from the removed nginx:
+
+    ACCEPT established,related / ACCEPT icmp / ACCEPT lo / ACCEPT tcp 22
+    ACCEPT tcp 80   (comment: http nginx)    <-- stale, removed
+    ACCEPT tcp 443  (comment: https nginx)   <-- stale, removed
+    REJECT everything else
+
+IPv6 was worse: the `ip6tables` INPUT chain was **completely empty with
+policy ACCEPT** — no host-level filtering at all on that stack.
+
+**Lockout protection.** Before changing anything, the current rules were
+saved and an automatic rollback was armed. The first attempt — a `nohup`
+background job — silently failed to start, because its log redirect hit
+a permission error, and a failed redirect prevents the command from
+executing at all. This was caught by explicitly checking that the
+process was running rather than trusting the "armed" message it had
+printed; without that check, the firewall change would have proceeded
+behind a safety net that did not exist. It was re-armed as a **systemd
+transient timer** (`systemd-run --on-active=300`) and verified genuinely
+active before proceeding.
+
+**New ruleset**, applied atomically via `iptables-restore` (so there is
+no window in which SSH could be dropped), for both IPv4 and IPv6:
+
+    policy INPUT DROP        <-- true default-deny, not just a trailing REJECT
+    ACCEPT established,related
+    ACCEPT loopback
+    ACCEPT icmp   (ipv6-icmp on v6 - required, or IPv6 neighbour discovery breaks)
+    ACCEPT tcp 22 NEW        <-- SSH
+    REJECT everything else
+
+No 80, no 443, no 8080. **No SIP, RTP or WireGuard rules** — those are
+deferred to the approved phase, and must be narrow when added.
+
+**Validation:** a genuinely fresh SSH session (`ControlPath=none`, no
+connection reuse) was confirmed working under the new policy *before*
+the rollback timer was cancelled. Only then were the rules persisted with
+`netfilter-persistent save`.
+
+**Docker firewall remnants cleared.** The first save captured stale
+Docker rules in the `nat` and `raw` tables — DNAT entries pointing at a
+bridge (`br-1f40492da35c`) and container IPs (172.18.0.x) that no longer
+exist. Both tables were reset to clean empty policies (nothing on this
+box needs NAT — WireGuard is split-tunnel with no MASQUERADE) and
+re-saved. Verified afterwards: zero Docker remnants across
+filter/nat/mangle/raw.
+
+**Reload behaviour — one defect found and fixed.** Reloading
+`netfilter-persistent` re-applies `rules.v4` *without flushing*, which
+**duplicated** the entire ruleset. It is functionally harmless (the first
+REJECT catches everything, so the duplicate set is unreachable) but it
+would grow with every reload. The rules were re-applied atomically to
+de-duplicate, and the canonical ruleset is now kept on the server at
+`/opt/symateq-calling/firewall-rules.v4` and `.v6` so it can always be
+re-applied cleanly. For future reloads, prefer
+`iptables-restore < /opt/symateq-calling/firewall-rules.v4` over
+`netfilter-persistent reload`.
+
+**Side benefit:** `rpcbind` (UDP/TCP 111) is still running as a stock
+Ubuntu service, but it is now unreachable from outside, since the host
+firewall does not permit it. Removing it entirely remains an optional
+tidy-up rather than an exposure concern.
+
+## 5. Post-hardening verification
+
+| Check | Result |
+|---|---|
+| Asterisk active, dialplan clean | PASS — "Dialplan reloaded."; contexts: internal 4, from-softphones 6, outbound-main 3, outbound-outreach 3, from-telnyx 3 |
+| PJSIP loaded | PASS — res_pjsip.so Running, use count 51 |
+| chan_sip not loaded | PASS — 0 modules loaded |
+| chan_iax2 not loaded | PASS — 0 modules loaded |
+| UDP 4569 closed | PASS — absent from `ss` output |
+| No unexpected listening ports | PASS — only 5060 (PJSIP), 51820 (WireGuard), 22 (SSH), 111 (rpcbind, now firewalled), 127.0.0.1:5038 (Asterisk AMI, loopback-only), systemd-resolved stubs, and Asterisk ephemeral RTP ports |
+| WireGuard healthy | PASS — service active, wg0 up, same server key, port 51820 |
+| Fail2ban jails active | PASS — asterisk + sshd |
+| SSH reconnect succeeds | PASS — fresh no-reuse session verified repeatedly throughout |
+| Firewall survives service reload | PASS — policy DROP and rules preserved across a netfilter-persistent reload and an Asterisk restart (duplication defect noted and fixed above) |
+| NSG attached, zero rules | PASS — still attached, rule count 0 |
+| Production + shared Security List untouched | PASS — symateq-a1 RUNNING at 144.24.119.32, nsg_ids empty; shared list still exactly 6 ingress rules; sites live: calculate 200, portal 307, personal 200 |
+
+**External reachability test from outside the cloud** — the definitive
+check on the inherited web exposure:
+
+    80.225.229.192:80   -> blocked
+    80.225.229.192:443  -> blocked
+    80.225.229.192:8080 -> blocked
+    80.225.229.192:22   -> reachable (correct)
+
+The shared Security List still permits 80/443/8080 at the cloud layer,
+unchanged as required — but the host firewall now denies them on this
+instance specifically, which was the goal.
+
+## Stopped here
+
+No Telnyx credentials added, no public ingress rules created, the two
+purchased numbers not configured, Phase 2 not started.
