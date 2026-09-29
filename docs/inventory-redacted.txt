@@ -1,0 +1,124 @@
+SYMATEQ Calling Server — Phase 0 Read-Only Discovery
+Run: 2026-09-29
+Target: the old symateq server, now dedicated to calling (public IP redacted below; see local README at C:\oci\OLD-SERVER-calling\README.txt for the real address)
+
+=== Gate 0: PASSED ===
+- This is confirmed NOT shared with any production application. Everything
+  that used to run here (website, Company OS, Planvas, n8n, nginx, Docker,
+  Let's Encrypt certs) was migrated to a separate server earlier the same
+  day, backed up (2 verified copies, checksummed), and then fully removed
+  from this box.
+- Resources are healthy: 1 OCPU, 954MB RAM (~568MB available), 37GB free
+  disk.
+- SSH access confirmed working and is the only path in (port 22 only).
+- No port/service conflicts: ports 5060, 5061, 10000-20000/udp, 51820/udp
+  are all free. No Asterisk/Kamailio/FreeSWITCH/WireGuard/Tailscale/Docker/
+  nginx/Caddy/PostgreSQL/n8n installed or running.
+
+=== OS ===
+OS=ubuntu 24.04
+Linux instance-20260903-2044 6.17.0-1020-oracle #20-Ubuntu SMP x86_64 GNU/Linux
+Architecture: x86_64
+CPUs: 2 (nproc reports 2, OCI console reports 1 OCPU — matches the OCPU:vCPU
+      ratio for x86 shapes, i.e. this is genuinely a 1-OCPU box)
+
+=== Resources ===
+Mem:           954Mi total   384Mi used   224Mi free   510Mi buff/cache   569Mi available
+Swap:          4.0Gi total    77Mi used
+Disk (/):      45G total   7.9G used   37G available (18%)
+
+=== Network ===
+ens3   10.0.0.160/24 (private)  — public IP is a RESERVED (static) IP as of
+                                   this discovery, converted from ephemeral
+                                   specifically so it will never change under
+                                   this server (important: Telnyx SIP ACL and
+                                   WireGuard client configs will hardcode this
+                                   IP, so it must stay fixed).
+docker0 interface: removed along with Docker itself (see below)
+
+=== Listening sockets (post-cleanup) ===
+tcp 0.0.0.0:22   — sshd (the only externally-reachable service)
+tcp/udp 111      — rpcbind (default Ubuntu cloud-image service, unrelated
+                    to this project; candidate for disabling in Phase 1/2
+                    hardening, not a blocker)
+127.0.0.x:53     — systemd-resolved (local DNS stub, not externally reachable)
+
+=== Running services (post-cleanup) ===
+cron, dbus, fwupd, getty, iscsid, ModemManager, multipathd, polkit,
+rpcbind, rsyslog, serial-getty, snap.oracle-cloud-agent(.updater),
+snapd, ssh, systemd-journald, systemd-logind, systemd-networkd,
+systemd-resolved, systemd-timesyncd, udisks2, unattended-upgrades,
+user@1001
+— all default Ubuntu/OCI base-image services. Nothing calling-related
+  installed yet (that's Phase 1).
+
+=== Docker / nginx / ufw ===
+Docker: was installed (docker.io + docker-compose-v2, the Ubuntu-repo
+        packages) — fully purged during today's cleanup, including the
+        stray docker0 bridge interface. `docker` command no longer exists.
+nginx:  was installed — fully purged, including Let's Encrypt certs and
+        all site configs.
+ufw:    not installed (handover Phase 2 will install it, or use nftables/
+        iptables directly — decide in Phase 2).
+
+=== Time sync ===
+System clock synchronized: yes
+NTP service: active
+Timezone: Etc/UTC (system clock stays UTC; Asterisk business-hours config
+          in Phase 3 will need the US target timezone applied at the
+          application level, not the system clock)
+
+=== Cloud provider / region ===
+Oracle Cloud Infrastructure (OCI), region ap-mumbai-1 (India West / Mumbai)
+Shape: VM.Standard.E2.1.Micro (Always Free tier)
+Availability Domain: kOwS:AP-MUMBAI-1-AD-1
+
+=== Public IP: static or ephemeral? ===
+Was EPHEMERAL at discovery time. Converted to RESERVED (permanent) as
+part of Phase 0 cleanup, since nothing was yet built depending on the old
+address — the right time to do this was before Telnyx/WireGuard configs
+existed, not after.
+
+=== OCI network security rules (current, BEFORE Phase 2 changes) ===
+Security list: "Default Security List" on the shared VCN
+  TCP 22          from 0.0.0.0/0     (SSH — keep)
+  ICMP            from 0.0.0.0/0
+  ICMP            from 10.0.0.0/16
+  TCP 8080        from 0.0.0.0/0     (unused leftover rule, nothing listens
+                                       on 8080 anymore — candidate to remove
+                                       in Phase 2 hardening)
+  TCP 80          from 0.0.0.0/0     (leftover from the removed nginx —
+                                       candidate to remove in Phase 2)
+  TCP 443         from 0.0.0.0/0     (same as above)
+
+NOT YET PRESENT (Phase 2 must add, per the handover's ordered rule list):
+  UDP 51820       from 0.0.0.0/0                    (WireGuard)
+  UDP 5060/5061   from Telnyx's current published IP ranges only
+  UDP 10000-20000 from Telnyx's current published IP ranges + WG subnet only
+
+This security list is SHARED with the other (now-production) server on the
+same VCN/subnet — changes here need to be scoped carefully (source-IP
+restricted, not blanket 0.0.0.0/0) so they don't loosen that server's
+exposure. Mirroring the handover's own instruction: "Mirror necessary
+inbound rules in the OCI NSG/security list... do not leave 5060 open to
+0.0.0.0/0."
+
+=== Existing DNS ===
+No DNS name currently points at this server. All three symateq subdomains
+(calculate/portal/personal) were switched to the other server earlier
+today. Telnyx numbers, once purchased, will need no DNS at all (SIP trunk
+is IP/credential-based, not DNS-based) unless a friendly hostname is
+wanted later.
+
+=== Existing backups/snapshots ===
+None stored ON this server (all cleared during cleanup). Two independently
+verified, checksummed copies of everything that used to run here exist
+elsewhere:
+  - C:\Users\sujja\OCI-Backups\always-free-old-server-copy-2026-09-29.tar.gz (laptop)
+  - ~/backups/always-free-old-server-copy-2026-09-29.tar.gz (on the other server)
+Neither is needed for the calling project — they're the prior workload's
+safety net, kept for reference only.
+
+=== Next step ===
+Gate 0 passed. Proceed to Phase 1 (OS preparation: Asterisk+PJSIP,
+WireGuard, Fail2ban, minimum required packages only).
