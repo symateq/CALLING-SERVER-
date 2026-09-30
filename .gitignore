@@ -1,0 +1,14 @@
+# Never commit client configs, keys or credentials.
+# Secrets are delivered to C:\oci\symateq-calling-secrets\ on the operator's
+# machine, which is deliberately outside this repository.
+*.conf
+*.key
+*.pem
+*.png
+*-secrets*
+*credential*
+*password*
+wg-*.conf
+symateq-laptop*
+symateq-mobile*
+secrets/
