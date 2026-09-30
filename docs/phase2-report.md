@@ -201,3 +201,130 @@ before normalisation.
 
 No Telnyx portal changes made, no test call placed, no WireGuard peers
 created, no credentials anywhere. Awaiting portal configuration.
+
+---
+
+# Phase 2 — post-portal server-side verification
+
+Run: 2026-09-30, after the Telnyx portal was configured.
+**No PSTN test call placed. No WireGuard peers created.**
+
+## Headline result: the trunk is live at the SIP layer
+
+```
+Contact: telnyx-aor/sip:sip.telnyx.com:5060   Avail   RTT 322-324 ms
+```
+
+This is real bidirectional confirmation — our OPTIONS reach Telnyx and
+Telnyx answers. It proves the IP authentication, the portal-side
+connection, the reserved IP and the firewall rules all line up. Before
+the portal was configured this contact sat at `NonQual`.
+
+## Checklist results
+
+| # | Check | Result |
+|---|---|---|
+| 1 | Back up Asterisk + firewall config | **DONE** — `/root/config-backups/20260930-031922-pre-telnyx-test/` holds pjsip, extensions, rtp, modules, cdr, voicemail, jail.local, both iptables rulesets and an astdb dump |
+| 2 | Telnyx endpoint / AOR / identify | **PASS** — endpoint `telnyx`, context `from-telnyx`, no auth section (IP authenticated), `direct_media=false`, `rtp_symmetric=true`, `force_rport=true`, `rewrite_contact=true`; AOR contact `Avail`; identify matches exactly the 3 US addresses |
+| 3 | Telnyx sources match firewall | **PASS** — feed re-fetched, still version `2026-05-25`, unchanged. All 3 signalling/UAC addresses and all 16 media CIDRs present; 3 signalling + 16 media rules installed; no rule permits `0.0.0.0/0` or `::/0` |
+| 4 | Inbound DID routing | **PASS** — `+14077511755`/`14077511755`/`4077511755` → `inbound-main` → extension 101; `+14077511178`/`14077511178`/`4077511178` → `inbound-outreach` → extension 102; both with voicemail fallback; unknown DIDs rejected |
+| 5 | Ext 101 outbound caller ID | **PASS** — endpoint `"SYMATEQ Support" <+14077511755>`, and the dialplan re-sets `CALLERID(num)=${MAIN_DID}` on every outbound call rather than trusting the softphone |
+| 6 | Ext 102 outbound caller ID | **PASS** — endpoint `"SYMATEQ Outreach" <+14077511178>`, dialplan sets `CALLERID(num)=${OUTREACH_DID}` |
+| 7 | G711U/G711A codec compatibility | **MISMATCH FOUND AND FIXED** — see below |
+| 8 | International / Caribbean / 900 / 976 blocked | **PASS** — verified at runtime, see table below |
+| 9 | CDR + Fail2ban active | **PASS** — `cdr_sqlite3_custom` Running and registered, `master.db` present (0 rows, correct — no calls yet); Fail2ban active with both `asterisk` and `sshd` jails, 0 failed, 0 banned |
+| 10 | Config reloads without errors | **PASS** — `core reload` clean; nothing but benign unconfigured-module notices (LDAP, phoneprov, ARI) |
+| 11 | Report and stop before PSTN test | **This document. Stopped.** |
+| 12 | No WireGuard peers / softphone ports | **CONFIRMED** — no peers exist, 51820 still blocked externally |
+
+## Item 7 — codec mismatch found and corrected
+
+The portal was configured with **G711U + G711A**. The server was still
+carrying the earlier spec, **ulaw + G722**. The only overlap was ulaw.
+
+Two concrete problems with leaving it:
+
+- **G722 was dead weight on the trunk.** Telnyx has it disabled, so
+  every outbound SDP would offer a codec the far end always rejects.
+- **G711A (alaw) was missing on our side.** Calls worked on ulaw, but
+  with no fallback — if Telnyx ever needed alaw, the call would fail
+  with `488 Not Acceptable Here` rather than degrade gracefully.
+
+Corrected: trunk **and** both extensions are now `ulaw, alaw`, with ulaw
+first. This matches the portal exactly, keeps ulaw as the preferred US
+codec, and means PSTN calls negotiate ulaw end to end with **no
+transcoding** — which matters on a 1-OCPU box.
+
+G722 was dropped rather than kept alongside. It only had value for
+internal 101↔102 calls, and keeping it would have reintroduced
+transcoding on any call that bridged to the PSTN leg.
+
+Trunk re-verified after the change: still `Avail`, RTT 322 ms.
+
+## Item 8 — blocked-route verification (runtime, not just config)
+
+Verified by evaluating the live lookups the dialplan actually performs:
+
+```
+DB(blockedac/900) -> "premium-or-nongeographic"   (non-empty => blocked)
+DB(blockedac/408) -> ""                            (empty     => allowed)
+DB(blockedex/976) -> "premium-exchange"            (non-empty => blocked)
+```
+
+| Destination | Type | Result |
+|---|---|---|
+| +1 900 555 1234 | premium 900 | BLOCKED (area code) |
+| +1 407 976 5551 | premium 976 exchange | BLOCKED (exchange) |
+| +1 700 555 1234 | carrier-specific 700 | BLOCKED (area code) |
+| +1 809 555 1234 | Caribbean NANP — Dominican Republic | BLOCKED |
+| +1 876 555 1234 | Caribbean NANP — Jamaica | BLOCKED |
+| +1 649 555 1234 | Caribbean NANP — Turks & Caicos | BLOCKED |
+| +1 868 555 1234 | Caribbean NANP — Trinidad | BLOCKED |
+| +1 408 555 1234 | US mainland | allowed |
+| +1 787 555 1234 | US territory — Puerto Rico | allowed |
+| +1 340 555 1234 | US territory — US Virgin Islands | allowed |
+| 011 44 20 7123 4567 | international dial-out prefix | rejected pre-normalisation |
+| 911 | emergency | rejected pre-normalisation |
+| +44 1234 567890 | non-NANP E.164 | no match — rejected |
+| 00 44 1234 | international prefix | rejected pre-normalisation |
+
+Emergency calling is disabled portal-side as well, so 911 is refused at
+both layers. This service must not be relied on for emergencies.
+
+## Note on firewall hit counters
+
+The Telnyx-specific firewall rules currently show **zero packet hits**,
+which is correct and not a fault. Our OPTIONS go outbound, and Telnyx's
+replies return on an existing conntrack flow, so they match the
+`RELATED,ESTABLISHED` rule first. The Telnyx source rules will only
+register hits when Telnyx *initiates* a flow toward us — i.e. the first
+inbound call, which has not happened yet. They are correctly positioned
+for that.
+
+## Note on historical log errors
+
+`messages.log` contains `Function premium-exchange not registered`
+errors timestamped Sep 29 18:53. These are artifacts of a verification
+command of mine whose shell escaping was mangled, so Asterisk received a
+literal string where a function reference was intended. They are not a
+dialplan defect. Errors strictly after the most recent reload are clean.
+
+## Current state
+
+| Item | State |
+|---|---|
+| Trunk | `Avail`, RTT ~322 ms, idle (`Not in use`) |
+| Extensions 101 / 102 | `Unavailable` — correct, no softphone registered yet (Phase 5) |
+| Codecs | ulaw, alaw — matching the portal exactly |
+| Concurrency | 1 outbound call, enforced both server-side and portal-side |
+| Call cap | 60 minutes hard limit |
+| CDR | Recording enabled, 0 rows (no calls yet) |
+| Firewall | 19 NSG rules + 23 host rules, all source-restricted; 80/443/8080/4569/51820 confirmed blocked externally; 22 reachable |
+| IPv4 / IPv6 policy | Both `DROP` |
+| Production isolation | `symateq-a1` untouched, `nsg_ids` empty, shared Security List still exactly 6 rules; all three sites live (200 / 307 / 200) |
+
+## Stopped
+
+No inbound or outbound PSTN test call placed. No WireGuard peers
+created. No softphone registration ports exposed. Awaiting approval to
+proceed to call testing.
