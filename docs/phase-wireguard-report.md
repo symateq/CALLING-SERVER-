@@ -211,3 +211,107 @@ approval.
 No PSTN call placed. No password or digest authorisation data exposed —
 the PJSIP logger was enabled briefly, captured nothing (MicroSIP had
 stopped retrying after the 404), and was switched off again.
+
+---
+
+## Addendum 2 — mobile 101 registration, contact policy (2026-09-30)
+
+Reported: mobile Linphone stuck on "Connecting" for extension 101, with
+a suspicion that stale MicroSIP contacts were consuming both
+`max_contacts=2` slots.
+
+### What the logs actually showed — two failures in sequence
+
+The suspicion was correct, but only for the first phase. The failure mode
+then changed:
+
+```
+13:03:00 - 13:04:08  WARNING res_pjsip_registrar.c:
+    Registration attempt from endpoint '101' (10.66.66.3) to AOR '101'
+    will exceed max contacts of 2
+
+13:04:15 onward      NOTICE res_pjsip/pjsip_distributor.c:
+    REGISTER from "SYMATEQ PRIMARY" <sip:101@10.66.66.1>
+    failed for '10.66.66.3:45162' - Failed to authenticate
+```
+
+By the time of inspection the stale contacts had expired, so the
+max-contacts block was already gone. The live blocker was authentication.
+
+**Decisive evidence that this is client-side:** the failing 101 REGISTER
+originates from `10.66.66.3:45162` — the *same source port* as the
+mobile's working 102 registration. Same device, same tunnel, same
+transport, same moment: 102 authenticates, 101 does not. That isolates
+the fault to the 101 credential stored in Linphone, not to the server,
+the VPN or the firewall.
+
+**No stale contacts required manual removal.** AOR 101 was empty (0 of 2)
+at inspection time, and nothing was deleted.
+
+### Server-side change — contact replacement policy
+
+The first-phase lockout was a genuine weakness: with `remove_existing=no`
+and `max_contacts=2`, a device re-registering from a new ephemeral port
+creates a *new* contact while its old one lingers until expiry (up to
+3600s), so two stale entries can lock a legitimate device out entirely.
+
+Applied to AORs **101 and 102 only** (`max_contacts` left at 2 as
+instructed):
+
+| Setting | Was | Now | Why |
+|---|---|---|---|
+| `qualify_frequency` | 0 | 60 | Asterisk now probes each contact hourly-per-minute with OPTIONS, so a dead registration is *known* to be dead rather than merely assumed live |
+| `remove_unavailable` | false | **yes** | When the AOR is full and a new registration arrives, contacts already proven unreachable are evicted first — the precise fix for the lockout |
+| `remove_existing` | false | **yes** | Last-resort fallback: if all contacts appear healthy and a third arrives, the oldest yields rather than the new device being refused |
+
+Why this is the safest arrangement for exactly two devices: in normal
+operation each device re-registers under its *own* contact URI, which
+updates in place and triggers no eviction at all. Eviction only engages
+when a genuinely new contact would exceed the limit, and then it removes
+proven-dead contacts before healthy ones. The failure mode changes from
+"legitimate device locked out for up to an hour" to "stale entry quietly
+reclaimed".
+
+The Telnyx AOR was deliberately left untouched (`remove_existing` still
+false, `max_contacts` 0).
+
+### New finding from enabling qualify
+
+Qualify immediately exposed something that was previously invisible:
+
+```
+101/sip:101@10.66.66.2:65299   Avail     34-49 ms   <- laptop, healthy
+102/sip:102@10.66.66.3:45162   Unavail   nan        <- mobile, not answering
+```
+
+Checked three times across 70+ seconds: the laptop answers consistently,
+**the mobile's 102 contact never does**. This is not a transient Android
+doze blip.
+
+So although Linphone reports 102 as "Connected" — and the registration
+itself is genuinely valid — the phone is not responding to SIP OPTIONS.
+On Android this is usually battery optimisation or background restriction
+on the Linphone app. It matters beyond diagnostics: **a device that does
+not answer OPTIONS will often fail to receive inbound INVITEs too**, so
+extension 102 may not reliably ring on that phone even though it looks
+connected.
+
+That contact was **not** removed: doing so would disrupt extension 102,
+which was explicitly out of scope, and the new `remove_unavailable`
+policy will reclaim the slot automatically if it is ever needed.
+Worth exempting Linphone from Android battery optimisation before relying
+on inbound calls.
+
+### Outcome
+
+| Item | State |
+|---|---|
+| Mobile 101 | Still failing — wrong password in Linphone, client-side |
+| Laptop 101 | Registered and healthy, `Avail` 34-49 ms |
+| Mobile 102 | Registered but unresponsive to OPTIONS — see above |
+| max_contacts | Unchanged at 2 on both AORs |
+| Stale contacts removed | None — none qualified for removal |
+| Extension 102 | Not disrupted |
+| Telnyx trunk | Untouched, `Avail` ~332 ms |
+| Credentials | Not exposed at any point |
+| PSTN call | None placed |
