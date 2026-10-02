@@ -77,3 +77,99 @@ Then deleted, server-side, `/root/wg-clients/` in full: `symateq-laptop.conf`, `
 ## Outstanding, not fixed this session
 
 **Voicemail application registration** — needs a scheduled Asterisk restart. No live-safe fix exists for the module's refusal-to-unload behavior. Does not affect any currently-working call path.
+
+---
+
+# Second reboot cycle — kernel update + voicemail restoration attempt
+
+Performed: 2026-10-02. Approved as "one controlled full-server reboot."
+**Result: neither of its two goals was achieved, and both failures are explained below with evidence, not assumed.**
+
+## Pre-reboot evidence
+
+| Item | Result |
+|---|---|
+| Active calls | **0** — `core show channels`: "0 active channels, 0 active calls" |
+| Config backup | `/root/config-backups/20261002-123052-pre-reboot-2/`, checksummed |
+| Reserved IP | `80.225.229.192` confirmed via OCI control plane |
+| SSH boot-safety | `ssh.socket` active + enabled, `WantedBy=sockets.target` (re-verified, not assumed) |
+| Pending kernel | `linux-image-oracle` upgradable `7.0.0-1012.12` → `7.0.0-1013.13` |
+| AOR 101/102, trunk | Recorded (see checksums table below) |
+
+**Pre-reboot checksums** (all identical to the first reboot cycle's baseline — zero drift across both cycles):
+
+```
+e6d24e63ba0db818759e95560436591afa6d116f5df0dafbb9b12b8e28aac5fc  cdr.conf
+7cdc08e0a02776be657814eba19ada5c40af42dff0fed22925ae3d523f4d350f  cdr_sqlite3_custom.conf
+44d2270cc7a4319037090ba193c6124112faac1ae440e7d33f6e66c8978fa99d  extensions.conf
+e6468fe0d5520e8528d0a5068be32b4e6728562e7608d26bc44656aa237d3513  jail.local
+ca65fc7a1dcb10331892291364943420786382a71d272a5153244bbd8d60be03  logger.conf
+3168716d71de8cba55bd174628481cbcb9a5a3cc553198c6803f731d3d68d98b  modules.conf
+0e28eb84b34a2153da086ca2b2eb462ede44e0f6833efc5e8e8e48339f901372  pjsip.conf
+53d3dd141bd657ae21b6811cd18e54e89d2f2e38fe92678d8df972baa3342a9f  rtp.conf
+7c493d0bfdc8df8d8bb387cd6438b71dd3a517cc9865c5d2a56130bcbd0ac47c  voicemail.conf
+64b991b216c5985a9c802e2aee6d69c37501bcc3e394668c8b10447ab0921ecc  wg0.conf
+```
+(`rules.v4`/`rules.v6` omitted from the comparison — `iptables-save` embeds live packet/byte counters, so their checksums always differ run to run even with identical rules; rule *content* verified separately below.)
+
+## Reboot
+
+Issued once, at `12:31:19 UTC`. SSH returned at `12:31:45` (uptime), confirming the kernel-swap concern was moot either way since SSH recovered immediately.
+
+## Finding 1 — kernel did NOT change, and here's exactly why
+
+```
+pre-reboot:  uname -r -> 7.0.0-1012-oracle
+post-reboot: uname -r -> 7.0.0-1012-oracle   (unchanged)
+
+dpkg -l | grep linux-image:
+  ii  linux-image-7.0.0-1012-oracle   <- installed, this is what's running
+  (1013 absent from dpkg -l entirely)
+
+apt list --upgradable (post-reboot, still):
+  linux-image-oracle/noble-updates 7.0.0-1013.13~24.04.1 [upgradable from: 7.0.0-1012.12]
+```
+
+**A reboot restarts into whatever kernel is already installed — it does not download or install anything.** `1013` was *available* in the package index both before and after this reboot, but nothing in this round's approved pre-reboot steps included running `apt upgrade` to actually pull it in. The reboot therefore had no kernel update to apply, and correctly did not apply one. This is not a failure of the reboot itself — it's a gap in what was done *before* it. If `1013` is wanted, that needs `apt-get upgrade` (installing the package) followed by **a separate, subsequently-approved reboot** for it to take effect — this reboot cannot be credited with having attempted it.
+
+## Finding 2 — Voicemail still unregistered, exactly as predicted
+
+```
+core show application Voicemail -> "Your application(s) is (are) not registered"
+```
+
+This confirms, for a second independent fresh boot in a row, the root cause already identified: three voicemail backend modules (`app_voicemail.so`, `app_voicemail_imap.so`, `app_voicemail_odbc.so`) all attempt to register identical application/manager-action names at every boot via `modules.conf`'s unqualified `autoload=yes`, and the registration consistently fails to settle on a winner. **A plain reboot cannot fix this** — it was already established that the real fix is adding `noload` entries for the two unused variants, which itself requires a restart to take effect. This round's approval did not include that change, so the outcome was predictable and is not a new regression.
+
+**Stopping here on both findings, per standing instruction** — no reinstall, no force-unload, no routing change. Both require separate, explicit approval:
+1. `apt-get upgrade` (installs 1013) + a subsequent reboot, for the kernel.
+2. `modules.conf` `noload` entries for `app_voicemail_imap.so`/`app_voicemail_odbc.so` + a subsequent reboot, for voicemail.
+
+## Post-reboot verification — everything else, full pass
+
+| # | Check | Result |
+|---|---|---|
+| 1 | Reserved IP unchanged | ✅ `80.225.229.192` |
+| 2 | Asterisk/WireGuard/Fail2ban auto-started | ✅ all active |
+| 3 | Voicemail registered | ❌ see Finding 2 |
+| 4 | Mailboxes 101/102 exist | ✅ "SYMATEQ Main", "SYMATEQ Outreach" |
+| 5 | PJSIP logging off, no diagnostic files | ✅ confirmed both; filesystem swept |
+| 6 | Telnyx trunk → Avail | ✅ 309 ms |
+| 7 | `max_contacts=2` | ✅ both AORs |
+| 8 | Routing/caller-ID/codecs/firewall/contact-policy unchanged | ✅ `extensions.conf` checksum identical; codecs `ulaw\|alaw`; both caller IDs intact; firewall 28/28 rules; `remove_existing=true`/`remove_unavailable=false` unchanged |
+| 9 | Contacts allowed to re-register, untouched | ✅ all 3 already back on their own (laptop+phone on 101, phone on 102) |
+| 10 | Production + shared Security List unchanged | ✅ sites 200/307/200; shared list still 6 rules; calling NSG `nsg_ids` confirmed empty on production |
+| 11 | Kernel changed | ❌ see Finding 1 |
+| 12 | No PSTN call | ✅ none placed |
+
+## Backup and checksum locations
+
+- This cycle: `/root/config-backups/20261002-123052-pre-reboot-2/CHECKSUMS.sha256`
+- Prior cycle (Asterisk-restart-only): `/root/config-backups/20261002-122036-pre-reboot/CHECKSUMS.sha256`
+- Sanitized, secret-redacted config bundle: `/opt/symateq-calling/sanitized-backup-20261002-120946/`
+
+## Outstanding — both need separate approval before the next reboot
+
+1. **Kernel**: run `apt-get upgrade` to actually install `7.0.0-1013`, then a subsequent reboot.
+2. **Voicemail**: add `noload => app_voicemail_imap.so` and `noload => app_voicemail_odbc.so` to `modules.conf`, then a subsequent reboot. (Same safe pattern already used for `chan_sip`/`chan_iax2` in Phase 1.)
+
+Both could be done together in one combined, separately-approved cycle rather than two more reboots.
