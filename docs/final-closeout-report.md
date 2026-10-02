@@ -173,3 +173,120 @@ This confirms, for a second independent fresh boot in a row, the root cause alre
 2. **Voicemail**: add `noload => app_voicemail_imap.so` and `noload => app_voicemail_odbc.so` to `modules.conf`, then a subsequent reboot. (Same safe pattern already used for `chan_sip`/`chan_iax2` in Phase 1.)
 
 Both could be done together in one combined, separately-approved cycle rather than two more reboots.
+
+---
+
+# Third maintenance cycle — minimal kernel install + voicemail backend fix — SUCCESS
+
+Performed: 2026-10-02. Both goals achieved, all 12 post-reboot checks pass.
+
+## Pre-change evidence
+
+| Item | Result |
+|---|---|
+| Active calls | **0** |
+| Backup | `/root/config-backups/20261002-123618-kernel-voicemail-maint/CHECKSUMS.sha256` |
+| Config checksums | Identical to every prior cycle's baseline — zero drift across all three maintenance cycles today |
+
+## Step 3 — module load state before the fix
+
+```
+app_voicemail.so                Running
+app_voicemail_imap.so           Not Running
+app_voicemail_odbc.so           Not Running
+res_pjsip_send_to_voicemail.so  Running
+```
+
+## Step 4 — confirmed SYMATEQ uses neither IMAP nor ODBC voicemail storage
+
+- `voicemail.conf`: no `imap`/`odbc` directives anywhere; `format=wav49|gsm|wav` (plain filesystem storage).
+- `res_odbc.conf`: the `[asterisk]` DSN section is `enabled => no` (stock default, never turned on).
+- `/etc/odbc.ini` and `/etc/odbcinst.ini`: **absent** — no system ODBC driver exists to connect to even if it were enabled.
+- No IMAP server configuration found anywhere under `/etc/asterisk/`.
+
+## Step 5 — exact proposed `modules.conf` diff (shown before applying)
+
+```diff
+--- /etc/asterisk/modules.conf
++++ /tmp/modules.conf.proposed
+@@ -72,4 +72,6 @@
+ noload => chan_sip.so
+ noload => chan_iax2.so
++noload => app_voicemail_imap.so
++noload => app_voicemail_odbc.so
+ [global]
+```
+
+## Steps 6–7 — kernel package dry-run
+
+```
+apt-get install --dry-run linux-image-7.0.0-1013-oracle
+
+NEW packages (2): linux-image-7.0.0-1013-oracle, linux-modules-7.0.0-1013-oracle
+0 upgraded, 2 newly installed, 0 to remove, 7 not upgraded (untouched)
+```
+
+## Step 8 — abort-condition check
+
+| Condition | Triggered? |
+|---|---|
+| Removes packages | No — 0 removed |
+| Updates Asterisk | No — not in the package list |
+| Alters networking/firewall packages | No — not in the package list |
+| Broad/unrelated changes | No — exactly 2 kernel-related packages |
+
+**Dry run was clean. Proceeded.**
+
+## Installation
+
+`apt-get install -y linux-image-7.0.0-1013-oracle` — installed cleanly, GRUB regenerated automatically, no service restarts triggered by the postinst scripts. Verified before rebooting:
+
+```
+/boot/vmlinuz-7.0.0-1013-oracle    present
+/boot/initrd.img-7.0.0-1013-oracle present
+/boot/vmlinuz -> vmlinuz-7.0.0-1013-oracle   (default boot symlink updated)
+grub.cfg contains 10 references to 7.0.0-1013-oracle
+```
+
+No Asterisk, networking or firewall package appeared in the resulting `dpkg -l` diff.
+
+## `modules.conf` applied — before/after checksums
+
+```
+before: 3168716d71de8cba55bd174628481cbcb9a5a3cc553198c6803f731d3d68d98b
+after:  ae1684e3f34b51c470b42d8a6a8804be5430b4332853ab077934d43d9b1476f3
+```
+
+Before-checksum matches the recorded baseline exactly. Applied content matches the diff verbatim. **Asterisk was not restarted separately** — the `noload` change took effect naturally at the one planned reboot.
+
+## Reboot — exactly once
+
+Issued `12:40:00 UTC`. SSH returned `12:40:42`.
+
+## Post-reboot verification — all 12 pass
+
+| # | Check | Result |
+|---|---|---|
+| 1 | `uname -r` = 7.0.0-1013-oracle | **PASS** |
+| 2 | Asterisk/WireGuard/Fail2ban auto-started | **PASS** |
+| 3 | `Voicemail` and `VoiceMailMain` registered | **PASS** — both show full application info (previously: "not registered") |
+| 4 | Mailboxes 101/102 exist | **PASS** — "SYMATEQ Main", "SYMATEQ Outreach" |
+| 5 | `app_voicemail_imap.so`/`app_voicemail_odbc.so` not loaded | **PASS** — absent entirely from `module show` (2 modules loaded, down from 4) |
+| 6 | Telnyx trunk Avail | **PASS** — 325 ms |
+| 7 | All 3 softphone contacts re-register naturally | **PASS** — laptop+phone on 101, phone on 102, all present untouched |
+| 8 | `max_contacts=2` | **PASS** — both AORs |
+| 9 | Routing/caller-ID/codecs/firewall/contact-policy unchanged | **PASS** — `extensions.conf` checksum identical to baseline; `ulaw\|alaw`; both caller IDs; firewall 28/28 rules; `remove_existing=true`/`remove_unavailable=false` |
+| 10 | PJSIP logging off, no diagnostic files | **PASS** |
+| 11 | Production + shared Security List unchanged | **PASS** — sites 200/307/200; shared list still 6 rules; calling NSG `nsg_ids` confirmed empty on production |
+| 12 | No PSTN call | **PASS** — none placed |
+
+## Backup and checksum locations (all three cycles)
+
+- Cycle 3 (this one): `/root/config-backups/20261002-123618-kernel-voicemail-maint/CHECKSUMS.sha256`
+- Cycle 2: `/root/config-backups/20261002-123052-pre-reboot-2/CHECKSUMS.sha256`
+- Cycle 1: `/root/config-backups/20261002-122036-pre-reboot/CHECKSUMS.sha256`
+- Sanitized, secret-redacted bundle: `/opt/symateq-calling/sanitized-backup-20261002-120946/`
+
+## Outcome
+
+Both previously-outstanding items from Findings 1 and 2 of the second reboot cycle are now resolved. No regressions in any of routing, caller IDs, codecs, firewall, contact policy, production, or the shared Security List across three consecutive reboots today.
