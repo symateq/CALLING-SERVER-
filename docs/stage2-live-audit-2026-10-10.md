@@ -51,7 +51,7 @@ Queried `/var/log/asterisk/master.db` (`cdr_sqlite3_custom`) directly.
 | "SYMATEQ" \<+14077511755\> (Primary) | NO ANSWER | 12 |
 | "SYMATEQ" \<+14077511178\> (Outreach) | NO ANSWER | 6 |
 | "SYMATEQ" \<+14077511178\> (Outreach) | ANSWERED | 0 |
-| "+14848099151" (neither business number) | ANSWERED | 1 |
+| +1484•••9151 (neither business number — redacted, provenance unconfirmed) | ANSWERED | 1 |
 
 Two things worth flagging honestly, not glossing over:
 
