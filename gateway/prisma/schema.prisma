@@ -1,0 +1,218 @@
+// Gateway's own database. Deliberately standalone — nothing here reads from or
+// writes to Company OS's Postgres instance or its server. This runs on the
+// calling server only.
+//
+// SQLite has no native enum type, so fields that are conceptually enums are
+// plain strings here, constrained by zod enums in the application layer
+// (see src/types.ts) rather than at the database level.
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model GatewayUser {
+  id              String    @id @default(cuid())
+  entraOid        String    @unique
+  entraTid        String
+  email           String    @unique
+  displayName     String
+  callingApproved Boolean   @default(false)
+  approvedAt      DateTime?
+  revokedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  devices         Device[]
+  lineAssignments UserLineAssignment[]
+  contacts        Contact[]
+  callOutcomes    CallOutcome[]
+  callNotes       CallNote[]
+  reminders       Reminder[]
+}
+
+model Device {
+  id           String    @id @default(cuid())
+  userId       String
+  user         GatewayUser @relation(fields: [userId], references: [id])
+  /// "ANDROID" | "WINDOWS"
+  platform     String
+  deviceId     String
+  pushToken    String?
+  lastSeenAt   DateTime  @default(now())
+  registeredAt DateTime  @default(now())
+  revokedAt    DateTime?
+
+  answeredLegs       CallLeg[]
+  reminderDeliveries ReminderDelivery[]
+
+  @@unique([userId, deviceId])
+}
+
+model Line {
+  id         String   @id @default(cuid())
+  label      String
+  e164Number String   @unique
+  extension  String?
+  createdAt  DateTime @default(now())
+
+  assignments  UserLineAssignment[]
+  callSessions CallSession[]
+}
+
+model UserLineAssignment {
+  id               String   @id @default(cuid())
+  userId           String
+  lineId           String
+  user             GatewayUser @relation(fields: [userId], references: [id])
+  line             Line        @relation(fields: [lineId], references: [id])
+  canUseAsCallerId Boolean  @default(true)
+  assignedAt       DateTime @default(now())
+
+  @@unique([userId, lineId])
+}
+
+model Contact {
+  id           String   @id @default(cuid())
+  ownerId      String
+  owner        GatewayUser @relation(fields: [ownerId], references: [id])
+  fullName     String
+  firm         String?
+  role         String?
+  phone        String
+  extension    String?
+  email        String?
+  city         String?
+  state        String?
+  zip          String?
+  ianaTimeZone String?
+  doNotCall    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  callSessions CallSession[]
+  notes        CallNote[]
+  reminders    Reminder[]
+}
+
+model CallSession {
+  id             String    @id @default(cuid())
+  providerCallId String?   @unique
+  /// "INBOUND" | "OUTBOUND"
+  direction      String
+  lineId         String
+  line           Line      @relation(fields: [lineId], references: [id])
+  contactId      String?
+  contact        Contact?  @relation(fields: [contactId], references: [id])
+  fromNumber     String
+  toNumber       String
+  startedAt      DateTime  @default(now())
+  answeredAt     DateTime?
+  endedAt        DateTime?
+  /// "ANSWERED" | "NO_ANSWER" | "BUSY" | "FAILED" | "CANCELED" | "ANSWERED_ELSEWHERE"
+  endReason          String?
+  answeredByDeviceId String?
+
+  legs       CallLeg[]
+  outcome    CallOutcome?
+  notes      CallNote[]
+  transcript Transcript?
+}
+
+model CallLeg {
+  id            String      @id @default(cuid())
+  callSessionId String
+  callSession   CallSession @relation(fields: [callSessionId], references: [id])
+  deviceId      String
+  device        Device      @relation(fields: [deviceId], references: [id])
+  /// "RINGING" | "ANSWERED" | "DECLINED" | "MISSED" | "CANCELED"
+  status        String      @default("RINGING")
+  ringStartedAt DateTime    @default(now())
+  resolvedAt    DateTime?
+}
+
+model CallOutcome {
+  id            String      @id @default(cuid())
+  callSessionId String      @unique
+  callSession   CallSession @relation(fields: [callSessionId], references: [id])
+  /// "INTERESTED" | "SEND_INFORMATION" | "CALLBACK_REQUESTED" | "MEETING_BOOKED"
+  /// | "NO_ANSWER" | "BUSY" | "NOT_INTERESTED" | "WRONG_NUMBER" | "DO_NOT_CALL" | "OTHER"
+  type          String
+  reachedWho    String?
+  description   String?
+  recordedById  String
+  recordedBy    GatewayUser @relation(fields: [recordedById], references: [id])
+  recordedAt    DateTime    @default(now())
+}
+
+model CallNote {
+  id            String       @id @default(cuid())
+  callSessionId String?
+  callSession   CallSession? @relation(fields: [callSessionId], references: [id])
+  contactId     String?
+  contact       Contact?     @relation(fields: [contactId], references: [id])
+  body          String
+  isDraft       Boolean      @default(false)
+  createdById   String
+  createdBy     GatewayUser  @relation(fields: [createdById], references: [id])
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+}
+
+model Transcript {
+  id            String      @id @default(cuid())
+  callSessionId String      @unique
+  callSession   CallSession @relation(fields: [callSessionId], references: [id])
+  /// "LIVE" | "FINALIZED" | "PARTIAL" | "FAILED"
+  status        String      @default("LIVE")
+  finalizedAt   DateTime?
+
+  segments TranscriptSegment[]
+}
+
+model TranscriptSegment {
+  id           String     @id @default(cuid())
+  transcriptId String
+  transcript   Transcript @relation(fields: [transcriptId], references: [id])
+  /// "LOCAL" | "REMOTE" | "UNKNOWN"
+  speaker      String     @default("UNKNOWN")
+  text         String
+  startMs      Int
+  endMs        Int
+  isFinal      Boolean    @default(false)
+  sequence     Int
+}
+
+model Reminder {
+  id        String   @id @default(cuid())
+  ownerId   String
+  owner     GatewayUser @relation(fields: [ownerId], references: [id])
+  contactId String?
+  contact   Contact?    @relation(fields: [contactId], references: [id])
+  body      String
+  dueAt     DateTime
+  /// "PENDING" | "SNOOZED" | "DONE"
+  status    String   @default("PENDING")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deliveries ReminderDelivery[]
+}
+
+model ReminderDelivery {
+  id          String   @id @default(cuid())
+  reminderId  String
+  reminder    Reminder @relation(fields: [reminderId], references: [id])
+  deviceId    String?
+  device      Device?  @relation(fields: [deviceId], references: [id])
+  /// "PUSH" | "LOCAL_ALARM"
+  channel     String
+  attemptedAt DateTime @default(now())
+  delivered   Boolean  @default(false)
+
+  @@unique([reminderId, deviceId, channel])
+}
