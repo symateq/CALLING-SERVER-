@@ -1,0 +1,7 @@
+[general]
+; Starts DISABLED on purpose, matching the live server's current state, so
+; the first thing this local instance proves is whether enabling it via
+; reload actually works without a restart -- not assumed.
+enabled=yes
+bindaddr=0.0.0.0
+bindport=8088

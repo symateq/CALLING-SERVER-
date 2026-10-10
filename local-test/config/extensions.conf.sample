@@ -1,0 +1,5 @@
+[webrtc-test]
+exten => 999,1,NoOp(WebRTC echo test - local prototype)
+ same => n,Answer()
+ same => n,Echo()
+ same => n,Hangup()
