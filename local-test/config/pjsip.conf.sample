@@ -5,12 +5,23 @@ type=global
 type=transport
 protocol=ws
 bind=0.0.0.0:8088
-external_media_address=127.0.0.1
-external_signaling_address=127.0.0.1
+external_media_address=192.168.1.5
+external_signaling_address=192.168.1.5
+; 172.20.0.0/16 is the Docker bridge's own internal subnet -- the "local"
+; side of the NAT from Asterisk's perspective. Anything outside this range
+; (the phone on the LAN, 192.168.1.x) is treated as across-NAT and gets
+; external_media_address substituted into its candidates.
+local_net=172.20.0.0/16
 
 [webrtc-test]
 type=aor
 max_contacts=1
+; Without this, a re-registration from what's logically the same client (a
+; new WebSocket connection each time the app reconnects) looks like a
+; second device and gets rejected once the first is already registered --
+; seen as repeated "will exceed max contacts of 1" warnings during real
+; testing. The live server's real 101/102 AORs already set this.
+remove_existing=yes
 
 [webrtc-test-auth]
 type=auth
