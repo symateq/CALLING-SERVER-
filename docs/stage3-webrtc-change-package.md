@@ -156,23 +156,53 @@ sudo asterisk -rx "dialplan reload"
 Rollback was tested in both directions locally (enable, then disable again
 via reload) — both non-disruptive, no restart, on this exact Asterisk build.
 
-## 6. What this does NOT yet prove
+## 6. What this now proves, with real evidence
 
-Local testing (see `local-asterisk-test/` and `symateq-connect-prototypes/
-local-asterisk-webclient/`) proved full SIP signaling end-to-end against
-this exact config: REGISTER succeeds, INVITE to the echo extension is
-answered, BYE tears down cleanly — all against a real, unmodified copy of
-this diff running the identical Asterisk package version.
+Local testing (see `local-test/`) proved, with actual recorded evidence,
+not just signaling success:
 
-**It did not prove actual two-way audio**, because the local test runs this
-Asterisk instance inside a Docker container reachable from the test browser
-only through Docker's bridge NAT, and Asterisk's ICE candidates reflect its
-own container-internal address (`172.17.0.2`), which the browser cannot
-reach — connections stayed in `ICE checking`, confirmed via the browser's
-own `RTCPeerConnection.getStats()`. This is a NAT artifact of the test
-topology, not a defect in the Asterisk config: the live server has a single
-real public IP, already set as `external_media_address` on the existing
-`transport-udp`, with no such NAT layer in between. The same setup is
-expected to let ICE connect normally there — but that is an expectation to
-verify on the live server itself (or from a machine with a direct, non-NAT'd
-path to it), not something this local test can establish.
+**Full SIP signaling**, end-to-end against this exact config: REGISTER
+succeeds, INVITE to the echo extension is answered, BYE tears down cleanly.
+
+**Real bidirectional audio.** The first attempt (browser on the Windows
+host, Asterisk in a Docker container reached only through Docker's bridge
+NAT) genuinely failed — ICE stuck in `checking`, 0 packets, because
+Asterisk advertised its container-internal address (`172.17.0.2`), which
+the host couldn't reach. Fixed by containerizing the test client itself and
+putting it on the *same* Docker network as Asterisk, eliminating the NAT
+boundary entirely. Re-run with that fix:
+
+```
+iceConnectionState: "connected"
+outbound-rtp: packetsSent=603, bytesSent=23222   (browser → Asterisk)
+inbound-rtp:  packetsReceived=603, bytesReceived=23222   (Asterisk → browser)
+```
+
+`packetsSent` exactly equals `packetsReceived` — every packet sent round-tripped
+back through the Echo() extension. Cross-checked independently from
+Asterisk's own side via `pjsip show channelstats` mid-call: `opus`, Receive
+283 / Transmit 283, 0% loss both directions, 0 jitter — agrees with the
+browser's own count.
+
+**The activation sequence applied while a call was already active, not
+just at idle.** Held a real call, captured a packet-count snapshot, then
+ran the exact `module reload` / `pjsip reload` / `dialplan reload` sequence
+from section 3 *while that call was still up*, then snapshotted again:
+
+```
+Before: packetsSent=206   |   After: packetsSent=606   |  connectionState: "connected" throughout
+```
+
+The call never dropped, audio never stalled, and a second, freshly-placed
+call immediately afterward also answered and carried real audio
+(`packetsSent=158`, growing). Unchanged process uptime alone was not treated
+as sufficient — this is direct evidence from the calling party's own
+perspective that the call survived the actual reload commands.
+
+This was all proven on a version-matched local Asterisk instance, reachable
+without Docker NAT in the loop. It is still not the live server itself —
+the live server's real public IP and its existing `external_media_address`
+on `transport-udp` mean it isn't expected to hit the Docker-NAT problem that
+the *first* local attempt hit, but that expectation has not been separately
+verified by testing against the live server directly, which remains
+pending the write permission.

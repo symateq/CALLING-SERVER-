@@ -19,32 +19,42 @@ docker exec symateq-local-asterisk-test asterisk -rx "pjsip show transports"
 docker exec symateq-local-asterisk-test asterisk -rx "http show status"
 ```
 
-## Run the signaling test
+## Run the signaling + real two-way-audio test
+
+The test client runs in its own container, on the **same Docker network**
+as Asterisk — not from the Windows host. This matters: an earlier attempt
+running the browser on the host hit Docker's bridge NAT (Asterisk advertised
+its container-internal address, `172.17.0.2`, which the host couldn't
+reach — ICE stayed stuck in `checking`, 0 packets, even with the RTP port
+range published and a public STUN server configured). Putting both
+containers on one user-defined network removes that NAT boundary entirely.
 
 ```bash
+docker network create symateq-local-test-net
+
+docker run -d --name symateq-local-asterisk-test --network symateq-local-test-net \
+  symateq-local-asterisk-test   # built from local-test/ as above
+
 cd webclient
-npm install
-npx playwright install chromium
-npm test
+docker build -t symateq-local-webclient-test .
+docker run --rm --network symateq-local-test-net \
+  -e WS_SERVER=ws://symateq-local-asterisk-test:8088/ws \
+  symateq-local-webclient-test
 ```
 
-Uses SIP.js (MIT) in headless Chromium with `--use-fake-device-for-media-stream`
-so no real microphone/speaker is needed. Confirms REGISTER, INVITE, answer,
-and BYE against the echo extension (999).
+Uses SIP.js (MIT) in headless Chromium (via the official
+`mcr.microsoft.com/playwright` image) with `--use-fake-device-for-media-stream`
+so no real microphone/speaker is needed. `run-test.mjs` confirms REGISTER,
+INVITE, answer and BYE, then reads the browser's own
+`RTCPeerConnection.getStats()` to confirm real bidirectional RTP
+(`inbound-rtp`/`outbound-rtp` packet counts, not just that the call
+"answered"). Cross-check independently from Asterisk's side with
+`pjsip show channelstats` mid-call.
 
-## Known limitation: this does not prove two-way audio
-
-Asterisk's ICE candidates reflect the container's internal Docker bridge
-address (`172.17.0.2`), which the host-side browser cannot reach — even with
-the RTP port range published and a public STUN server configured, the
-connection stays in `ICE checking`. This is a NAT artifact of testing a
-containerized Asterisk from the host, not a defect in the config itself; see
-`docs/stage3-webrtc-change-package.md` section 6 for why the live server
-(real public IP, no Docker NAT) isn't expected to hit the same wall.
-
-If a future session wants to close this gap locally rather than on the live
-server, the most direct paths are: running the test browser inside the same
-Docker network namespace as Asterisk (another container, not the Windows
-host), or using `docker network create` with a macvlan/ipvlan driver so the
-container gets a real LAN-routable address instead of bridge-NAT'd one.
-Neither was attempted here.
+`run-reload-safety-test.mjs` holds a call, snapshots packet counts, applies
+the real `module reload`/`pjsip reload`/`dialplan reload` sequence from
+`docs/stage3-webrtc-change-package.md` **while that call is still active**
+(run the three `docker exec ... asterisk -rx ...` commands from the host,
+timed a few seconds into the script's run), then confirms the call stayed
+`connected` with packets still growing, and that a fresh second call placed
+immediately after also works.

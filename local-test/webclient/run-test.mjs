@@ -6,7 +6,8 @@ import { extname, join } from "node:path";
 const PORT = 5757;
 
 const server = createServer(async (req, res) => {
-  const path = req.url === "/" ? "/index.html" : req.url;
+  const pathname = new URL(req.url, "http://localhost").pathname;
+  const path = pathname === "/" ? "/index.html" : pathname;
   try {
     const body = await readFile(join(import.meta.dirname, path));
     const type = extname(path) === ".js" ? "text/javascript" : "text/html";
@@ -29,12 +30,18 @@ const browser = await chromium.launch({
 const page = await browser.newPage();
 page.on("console", (msg) => console.log("[page]", msg.text()));
 
-await page.goto(`http://localhost:${PORT}/`);
+const wsServer = process.env.WS_SERVER || "ws://127.0.0.1:18088/ws";
+await page.goto(`http://localhost:${PORT}/?ws=${encodeURIComponent(wsServer)}`);
+console.log("Using WS server:", wsServer);
 
 async function waitFor(predicate, timeoutMs, label) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const result = await page.evaluate(() => window.__result);
+    if (!result) {
+      await new Promise((r) => setTimeout(r, 300));
+      continue;
+    }
     if (result.error) {
       console.log(`FAILED before "${label}": ${result.error}`);
       return result;

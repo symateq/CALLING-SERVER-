@@ -11,7 +11,7 @@ window.RTCPeerConnection = function (...args) {
 };
 window.RTCPeerConnection.prototype = NativeRTCPeerConnection.prototype;
 
-const SERVER = "ws://127.0.0.1:18088/ws";
+const SERVER = window.__WS_SERVER__ || "ws://127.0.0.1:18088/ws";
 
 const user = new Web.SimpleUser(SERVER, {
   aor: "sip:webrtc-test@127.0.0.1",
@@ -54,6 +54,7 @@ user.delegate = {
 };
 
 window.__hangup = () => user.hangup();
+window.__call = (destination) => user.call(destination);
 
 (async () => {
   try {
