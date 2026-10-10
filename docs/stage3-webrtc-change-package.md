@@ -1,5 +1,67 @@
 # WebRTC echo-test change package — prepared, not applied
 
+## How the apps will actually connect — WiFi, mobile data, and what's not yet proven
+
+Everything proven so far (sections below) used one of two topologies: two
+Docker containers on the same network, or this dev machine reaching its own
+LAN IP. Neither is the same as a phone on WiFi or mobile data reaching the
+live server from anywhere. Being explicit about the gap rather than
+papering over it:
+
+**What changes for the real deployment, and why each one matters:**
+
+1. **`wss://`, not `ws://`.** The local tests use plain `ws://` because the
+   client and server are on a private network I control end-to-end. Once
+   this is reachable from an actual phone on WiFi or mobile data, that
+   traffic crosses networks I don't control — it needs real TLS
+   (`transport=wss`, Asterisk's embedded HTTPS server with a real
+   certificate). Android itself would also simply refuse a plain `ws://`
+   connection to anything outside the one IP explicitly whitelisted in
+   `network_security_config.xml` — that whitelisting is deliberately
+   scoped to the local test IP only, so this isn't just a server-side
+   requirement.
+2. **A real, publicly-resolvable address with a real certificate.** The
+   live server already has this — a genuine public IP, already used as
+   `external_media_address` on `transport-udp`. What doesn't exist yet: a
+   DNS name for it (the plan proposes `calling.symateq.com`) and a TLS
+   certificate (Let's Encrypt is free and would be the natural choice,
+   needs that DNS name pointed at the server first).
+3. **TURN relay, for when direct connectivity fails.** WiFi-to-server often
+   works with direct ICE connectivity alone (what the LAN test above
+   approximates). Mobile data frequently does not — carrier-grade NAT
+   means many phones have no directly reachable address at all, and some
+   corporate/public WiFi networks block the UDP ports direct media needs.
+   Without a TURN relay, calls over mobile data specifically should be
+   expected to fail intermittently, not work by luck. **Nothing here has a
+   TURN server configured yet.** A self-hosted `coturn` instance is the
+   ₹0-compatible option (free software, runs on the same calling server,
+   costs only the compute already paid for) — not yet set up or tested.
+4. **The signaling port needs to be genuinely internet-facing**, not just
+   LAN-reachable. That's a firewall/NSG change on the live server, which is
+   exactly the kind of live-server write this whole package is waiting on
+   permission for — not something to do incidentally while proving
+   something else.
+
+**What was actually verified this session, and its real scope:** the
+signaling port (8088) was published to this dev machine's real LAN-facing
+interface (`192.168.1.5`, not just `127.0.0.1`) and confirmed reachable via
+HTTP from the host (`200`), with the one firewall rule found
+(`Docker Desktop Backend`) confirmed to cover both the Private and Public
+network profiles — relevant because the actual WiFi network here
+(`Airtel_Rio`) is classified Public by Windows, which has stricter default
+inbound rules. That's real diligence, not nothing. But every verification
+*test* I ran myself still resolved through Docker's internal routing rather
+than a genuinely separate device's network stack — Docker Desktop
+containers can reach each other through paths that don't fully simulate an
+external device. The only test that actually proves phone-over-WiFi
+reachability is the phone itself attempting it, which is pending.
+
+**Bottom line:** the Docker-same-network test proves the Asterisk
+configuration and signaling/media logic are correct. It does not, and was
+never going to, prove internet-wide reachability — that needs `wss://`, a
+real certificate, and very likely a TURN server, none of which exist yet.
+Treat the LAN test as "the protocol works," not "the deployment is ready."
+
 Prepared 11 October 2026. This is the exact, reviewed change for adding an
 internal, free, WebRTC echo-test path to the live calling server. **It has
 not been applied.** Applying it requires either an explicit permission grant
